@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <canvas class="webgl"></canvas>
+    <div class="instructions">- Press to add thickness -</div>
+    <div id="credits">
+      <p><a href="https://codepen.io/Yakudoo/" target="blank">my other codepens</a> | <a href="http://epic.net" target="blank">epic.net</a></p>
+    </div>
+    
+    <script type="x-shader/x-vertex" id="floorVertexShader">
+      varying vec2 vUv; 
+    
+      #include <common>
+      #include <shadowmap_pars_vertex>
+      #include <logdepthbuf_pars_vertex>
+    
+      void main() {
+        #include <beginnormal_vertex>
+        #include <defaultnormal_vertex>
+        #include <begin_vertex>
+    
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+    
+        #include <logdepthbuf_vertex>
+        #include <worldpos_vertex>
+        #include <shadowmap_vertex>
+    
+      }
+    </script>
+    
+    <script type="x-shader/x-fragment" id="floorFragmentShader">
+      uniform vec3 color;
+      uniform sampler2D tScratches;
+      varying vec2 vUv;
+      
+      #include <common>
+      #include <packing>
+      #include <lights_pars_begin>
+      #include <shadowmap_pars_fragment>
+      #include <shadowmask_pars_fragment>
+      #include <logdepthbuf_pars_fragment>
+    
+      void main() {
+          #include <logdepthbuf_fragment>
+          vec3 col = color;
+          vec4 scratchesCol = texture2D( tScratches, vUv);
+          float inkValue = max( max(scratchesCol.r, scratchesCol.g), scratchesCol.b);
+          col = mix(col, scratchesCol.rgb, inkValue);
+          col.r = min(col.r, 1.0);
+          col.g = min(col.g, 1.0);
+          col.b = min(col.b, 1.0);
+          
+          col.gb -= (1.0 - getShadowMask() ) * .1;
+          gl_FragColor = vec4(col, 1.0);
+           #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+    </script>
+    <script type="x-shader/x-vertex" id="simulationVertexShader">
+      precision highp float;
+    
+      uniform float time;
+      varying vec2 vUv;
+    
+      void main() {
+        vUv = uv;
+        vec4 modelViewPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * modelViewPosition; 
+      }
+    </script>
+    
+    <script type="x-shader/x-fragment" id="simulationFragmentShader">
+      // fragment shader
+      uniform sampler2D inputTexture;
+      uniform sampler2D noiseTexture;
+      uniform vec2 tipPosOld;
+      uniform vec2 tipPosNew;
+      uniform float speed;
+      uniform float persistence;
+      uniform float thickness;
+      uniform float time;
+      uniform float waterQuantity;
+      uniform float waterDiffusion;
+      uniform float gravity;
+      uniform vec3 inkColor;
+      varying vec2 vUv;
+    
+      float lineSegment(vec2 p, vec2 a, vec2 b, float thickness) {
+        vec2 pa = p - a;
+        vec2 ba = b - a;
+        float h = clamp( dot(pa,ba)/dot(ba,ba), 0.0, 1.0 );
+        float idk = length(pa - ba*h);
+        idk = smoothstep(thickness, thickness * .5, idk);
+        return idk;
+      }
+      
+      vec4 blur(sampler2D image, vec2 uv, vec2 resolution, vec2 direction){
+        vec4 color = vec4(0.0);
+        vec2 off1 = vec2(.013846153846) * direction;
+        vec2 off2 = vec2(.032307692308) * direction;
+        color += texture2D(image, uv) * 0.2270270270;
+        color += texture2D(image, uv + vec2(off1 * resolution)) * 0.3162162162;
+        color += texture2D(image, uv - vec2(off1 * resolution)) * 0.3162162162;
+        color += texture2D(image, uv + vec2(off2 * resolution)) * 0.0702702703;
+        color += texture2D(image, uv - vec2(off2 * resolution)) * 0.0702702703;
+        return color;
+      }
+    
+      void main() {
+        
+        vec4 noise1 = texture2D(noiseTexture, vUv * 4.0 + vec2(time * .1, .0));
+        vec4 noise2 = texture2D(noiseTexture, vUv * 8.0 + vec2(.0, time * .1) + noise1.rg * .5);
+        vec4 noise3 = texture2D(noiseTexture, vUv * 16.0 + vec2(-time*.05, 0.) + noise2.rg * .5);
+        vec4 noise = (noise1 + noise2 * .5 + noise3 * .25 ) / 1.75;
+        float dirX = (-.5 + noise.g) * noise.r * 10.;
+        float dirY = (-.5 + noise.b) * noise.r * 10.;
+        
+        
+        vec4 oldTexture = texture2D(inputTexture, vUv);
+        float br = 1. - + (oldTexture.r + oldTexture.g + oldTexture.b)/3.0;
+        vec4 col = oldTexture * (1.0 - waterDiffusion);
+        float p2 = (waterDiffusion)/4.0;
+        vec2 stretchUv = vUv * vec2(1.0, 1.0 + gravity);
+        col += blur(inputTexture, stretchUv, vec2(waterQuantity * br), vec2(dirX, dirY) ) * p2;
+        col += blur(inputTexture, stretchUv, vec2(waterQuantity * br), vec2(dirY, dirX) ) * p2;
+        col += blur(inputTexture, stretchUv, vec2(waterQuantity * br), vec2(-dirX, -dirY) ) * p2;
+        col += blur(inputTexture, stretchUv, vec2(waterQuantity * br), vec2(-dirY, -dirX) ) * p2;
+        col.rgb *= persistence;
+        
+        if (speed>0.0){
+          float lineValue = 0.;
+          float th = clamp( thickness + speed * .3, .0001, .1) ;
+          lineValue = lineSegment(vUv , tipPosOld, tipPosNew, th);
+          col.rgb = mix(col.rgb, inkColor, lineValue);
+          col.rgb = clamp( col.rgb, vec3(0.), vec3(1.));
+        }
+       
+        gl_FragColor = vec4(col);
+    }
+    </script>
+  
+  <script src="./index.js"></script>
+  </body>
+</html>
